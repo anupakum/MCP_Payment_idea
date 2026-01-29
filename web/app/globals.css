@@ -1,0 +1,181 @@
+﻿/* OrchestrateAI Theme - Import Ubuntu font */
+@import url("https://fonts.googleapis.com/css2?family=Ubuntu:wght@300;400;500;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* OrchestrateAI Brand Colors */
+    --oai-primary: #35b8ff;
+    --oai-secondary: #003366;
+    --oai-bg: #000000;
+    --oai-surface: #1a1a1a;
+    --oai-surface-light: #2a2a2a;
+
+    /* Text Colors */
+    --oai-text: #f6f6f6;
+    --oai-text-main: #f6f6f6;
+    --oai-text-muted: #c5c5c5;
+    --oai-text-disabled: #6b7280;
+
+    /* System Colors */
+    --oai-dark-grey: #272936;
+    --oai-success: #21c354;
+    --oai-warning: #ffa500;
+    --oai-error: #ff4b4b;
+    --oai-info: #0068c9;
+
+    /* Forms */
+    --oai-input-bg: #262730;
+    --oai-input-border: #3a3a4a;
+
+    /* Layout */
+    --oai-border: #2a2a3a;
+    --oai-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+
+    /* Tailwind compatibility mappings */
+    --background: 0 0% 0%;
+    --foreground: 0 0% 96.5%;
+    --card: 0 0% 10.2%;
+    --card-foreground: 0 0% 96.5%;
+    --popover: 0 0% 0%;
+    --popover-foreground: 0 0% 96.5%;
+    --primary: 199 100% 60%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 210 100% 20%;
+    --secondary-foreground: 0 0% 96.5%;
+    --muted: 0 0% 16.5%;
+    --muted-foreground: 0 0% 77.3%;
+    --accent: 199 100% 60%;
+    --accent-foreground: 0 0% 0%;
+    --destructive: 0 100% 63.7%;
+    --destructive-foreground: 0 0% 96.5%;
+    --border: 0 0% 16.5%;
+    --input: 0 0% 14.9%;
+    --ring: 199 100% 60%;
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    font-family: "Ubuntu", Verdana, sans-serif !important;
+    @apply border-border;
+  }
+
+  body {
+    background-color: var(--oai-bg);
+    color: var(--oai-text);
+    font-size: 13px;
+    line-height: 1.6;
+    margin: 0;
+    padding: 0;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    color: var(--oai-primary);
+    font-weight: 500;
+    margin: 0;
+  }
+
+  input, textarea, select {
+    font-size: 13px !important;
+    background-color: var(--oai-input-bg) !important;
+    color: var(--oai-text) !important;
+    border: 1px solid var(--oai-input-border) !important;
+    border-radius: var(--radius) !important;
+  }
+
+  input:focus, textarea:focus, select:focus {
+    border-color: var(--oai-primary) !important;
+    box-shadow: 0 0 0 3px rgba(53, 184, 255, 0.1) !important;
+    outline: none;
+  }
+
+  label {
+    font-size: 13px;
+    color: var(--oai-text);
+    font-weight: 500;
+  }
+}
+
+@layer components {
+  /* Custom chat window styling */
+  .chat-window {
+    @apply h-[600px] max-h-[80vh] flex flex-col;
+  }
+
+  .chat-messages {
+    @apply flex-1 overflow-y-auto space-y-4 p-4;
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--muted-foreground)) transparent;
+  }
+
+  .chat-messages::-webkit-scrollbar {
+    @apply w-2;
+  }
+
+  .chat-messages::-webkit-scrollbar-track {
+    @apply bg-transparent;
+  }
+
+  .chat-messages::-webkit-scrollbar-thumb {
+    @apply bg-muted-foreground rounded-full;
+  }
+
+  /* Message styling */
+  .message-user {
+    @apply ml-auto max-w-[80%] bg-primary text-primary-foreground rounded-lg p-3;
+  }
+
+  .message-assistant {
+    @apply mr-auto max-w-[80%] bg-card border rounded-lg p-3;
+  }
+
+  /* Card item animations */
+  .card-item:hover {
+    @apply transform scale-[1.02] transition-transform duration-200;
+  }
+
+  /* Transaction table styling */
+  .transaction-row:hover {
+    @apply bg-muted/50 transition-colors duration-200;
+  }
+
+  /* Loading states */
+  .loading-pulse {
+    @apply animate-pulse bg-muted rounded;
+  }
+
+  /* Status indicators */
+  .status-resolved {
+    @apply bg-green-500/20 text-green-400 border-green-500/50;
+  }
+
+  .status-rejected {
+    @apply bg-red-500/20 text-red-400 border-red-500/50;
+  }
+
+  .status-forwarded {
+    @apply bg-yellow-500/20 text-yellow-400 border-yellow-500/50;
+  }
+
+  /* Gradient animation for heading */
+  @keyframes gradient {
+    0% {
+      background-position: 0% 50%;
+    }
+    50% {
+      background-position: 100% 50%;
+    }
+    100% {
+      background-position: 0% 50%;
+    }
+  }
+
+  .animate-gradient {
+    animation: gradient 3s ease infinite;
+  }
+}

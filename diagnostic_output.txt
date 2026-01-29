@@ -1,0 +1,9 @@
+CRITICAL SCRIPT ERROR
+Traceback (most recent call last):
+  File "C:\code\test\MCP_Payment_idea-main\MCP_Payment_idea-main\diagnose_aws.py", line 18, in run_diagnostic
+    for line in f:
+                ^
+  File "C:\Program Files\WindowsApps\PythonSoftwareFoundation.Python.3.12_3.12.2800.0_x64__qbz5n2kfra8p0\Lib\encodings\cp1252.py", line 23, in decode
+    return codecs.charmap_decode(input,self.errors,decoding_table)[0]
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+UnicodeDecodeError: 'charmap' codec can't decode byte 0x8f in position 870: character maps to <undefined>
