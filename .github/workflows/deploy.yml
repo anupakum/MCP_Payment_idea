@@ -1,0 +1,387 @@
+name: Terraform Apply or Destroy
+
+on:
+  #   pull_request:
+  #     branches:
+  #       - main
+
+  workflow_dispatch:
+    inputs:
+      agent_action:
+        description: "create or destroy"
+        required: true
+        type: string
+      agent_identifier_name:
+        description: "Agent Identifier Name"
+        required: true
+        type: string
+      email_id:
+        description: "Email ID of requester"
+        required: false
+        type: string
+
+concurrency:
+  group: terraform-${{ github.workflow }}-${{ github.event.inputs.agent_identifier_name || github.run_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+env:
+  APP_ENV: ${{ github.ref == 'refs/heads/master' && 'prod' || 'dev' }}
+  REQUEST_TYPE: ${{ github.event_name == 'workflow_dispatch' && 'non playground' || 'playground request' }}
+  EMAIL_ID: ${{ github.event.inputs.email_id }}
+  GITHUB_USERNAME: ${{ github.actor }}
+jobs:
+  set_env_vars_dispatch:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    outputs:
+      agent_action: ${{ steps.setvars.outputs.agent_action }}
+      agent_identifier_name: ${{ steps.setvars.outputs.agent_identifier_name }}
+    steps:
+      - name: Set Env for Dispatch
+        id: setvars
+        run: |
+          if [[ "${{ github.event.inputs.agent_action }}" != "create" && "${{ github.event.inputs.agent_action }}" != "destroy" ]]; then
+            echo "Invalid agent_action: ${{ github.event.inputs.agent_action }} (expected: create|destroy)"
+            exit 1
+          fi
+          echo "agent_action=${{ github.event.inputs.agent_action }}" >> $GITHUB_ENV
+          echo "agent_identifier_name=${{ github.event.inputs.agent_identifier_name }}" >> $GITHUB_ENV
+          echo "agent_action=${{ github.event.inputs.agent_action }}" >> $GITHUB_OUTPUT
+          echo "agent_identifier_name=${{ github.event.inputs.agent_identifier_name }}" >> $GITHUB_OUTPUT
+          echo "REQUEST_TYPE=${{ env.REQUEST_TYPE }}" >> $GITHUB_ENV
+          echo "EMAIL_ID=${{ github.event.inputs.email_id }}" >> $GITHUB_ENV
+          echo "GITHUB_USERNAME=${{ github.actor }}" >> $GITHUB_OUTPUT
+
+  terraform_dispatch:
+    runs-on: ubuntu-latest
+    needs: [set_env_vars_dispatch]
+    if: >-
+      needs.set_env_vars_dispatch.outputs.agent_action == 'create' ||
+      needs.set_env_vars_dispatch.outputs.agent_action == 'destroy'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Set effective env vars
+        id: setenvs
+        run: |
+          ACTION="${{ needs.set_env_vars_dispatch.outputs.agent_action }}"
+          if [ -z "$ACTION" ]; then
+            ACTION="${{ needs.set_env_vars_dispatch.outputs.agent_action }}"
+          fi
+
+          AGENT_NAME="${{ needs.set_env_vars_dispatch.outputs.agent_identifier_name }}"
+          if [ -z "$AGENT_NAME" ]; then
+            AGENT_NAME="${{ needs.set_env_vars_dispatch.outputs.agent_identifier_name }}"
+          fi
+
+          echo "agent_action=$ACTION" >> $GITHUB_ENV
+          echo "agent_identifier_name=$AGENT_NAME" >> $GITHUB_ENV
+          echo "EMAIL_ID=${{ env.EMAIL_ID }}" >> $GITHUB_ENV
+          echo "GITHUB_USERNAME=${{ env.GITHUB_USERNAME }}" >> $GITHUB_ENV
+
+      - name: Show Inputs
+        run: |
+          echo "ACTION=${agent_action}"
+          echo "AGENT_NAME=${agent_identifier_name}"
+          echo "APP_ENV=${APP_ENV}"
+          echo "REQUEST_TYPE=${REQUEST_TYPE}"
+          echo "EMAIL_ID=${{ env.EMAIL_ID }}"
+          echo "GITHUB_USERNAME=${{ env.GITHUB_USERNAME }}"
+
+      - name: Configure AWS credentials (Production)
+        if: env.APP_ENV == 'prod'
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Configure AWS credentials (Development)
+        if: env.APP_ENV == 'dev'
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.DEV_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.DEV_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.7.5
+
+      - name: Sync files to S3
+        run: |
+          if [[ "${APP_ENV}" == "prod" ]]; then
+            S3_BUCKET="ptr-ag-bnk-pmts-dispute-resol"
+          else
+            S3_BUCKET="dev-ptr-ag-bnk-pmts-dispute-resol"
+          fi
+          echo "Syncing to S3 bucket: $S3_BUCKET"
+          aws s3 sync . s3://$S3_BUCKET --exclude ".git/*" --exclude ".github/*" --exclude "terraform/.terraform/*"
+
+      - name: Render and Save tfvars JSON (only for create)
+        if: >-
+          needs.set_env_vars_dispatch.outputs.agent_action == 'create'
+        run: |
+          mkdir -p tfvars_agt_input
+          cat > tfvars_agt_input/${agent_identifier_name}.tfvars.json <<EOF
+          {
+            "agent_identifier_name": "${agent_identifier_name}",
+            "app_env": "${APP_ENV}",
+            "request_type": "${REQUEST_TYPE}",
+            "email_id": "${{ env.EMAIL_ID }}",
+            "github_username": "${{ env.GITHUB_USERNAME }}"
+
+          }
+          EOF
+          cp tfvars_agt_input/${agent_identifier_name}.tfvars.json terraform.tfvars.json
+          echo "Generated tfvars file:" && cat terraform.tfvars.json
+
+      - name: Terraform Init with Remote Backend
+        run: |
+          cd terraform
+          if [[ "${APP_ENV}" == "prod" ]]; then
+            BACKEND_BUCKET="ptr-tf-state-prd"
+            STATE_KEY="state/prod/bnk-pmts-dispute-resol/${agent_identifier_name}/terraform.tfstate"
+            DYNAMODB_TABLE="dispute-tf-lock-prd"
+          else
+            BACKEND_BUCKET="dev-ptr-ag-bnk-pmts-dispute-resol-terraform-locks"
+            STATE_KEY="state/dev/${agent_identifier_name}/terraform.tfstate"
+            DYNAMODB_TABLE="terraform-lock-dev"
+          fi
+
+          echo "🔧 Initializing Terraform with backend bucket: $BACKEND_BUCKET"
+
+          # Check for active locks first
+          LOCK_ID="${BACKEND_BUCKET}/${STATE_KEY}"
+          if aws dynamodb get-item \
+            --table-name ${DYNAMODB_TABLE} \
+            --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+            --region us-east-1 \
+            --output text \
+            --query 'Item.LockID.S' >/dev/null 2>&1; then
+            echo "⚠️ Found active lock, waiting 30 seconds..."
+            sleep 30
+            # Try to remove stale lock (only if it's old)
+            aws dynamodb delete-item \
+              --table-name ${DYNAMODB_TABLE} \
+              --key "{\"LockID\": {\"S\": \"$LOCK_ID\"}}" \
+              --region us-east-1 || echo "⚠️ Could not remove lock"
+          fi
+
+          # Pre-initialization check for state consistency issues
+          echo "🔍 Checking for state consistency issues..."
+          if aws s3 ls s3://${BACKEND_BUCKET}/${STATE_KEY} >/dev/null 2>&1; then
+            echo "📄 State file exists in S3"
+
+            # Only check for digest entries if this is a fresh run after failed destroy
+            DIGEST_KEY="${BACKEND_BUCKET}/${STATE_KEY}-digest"
+            if aws dynamodb get-item \
+              --table-name ${DYNAMODB_TABLE} \
+              --key "{\"LockID\": {\"S\": \"$DIGEST_KEY\"}}" \
+              --region us-east-1 \
+              --output text \
+              --query 'Item.LockID.S' >/dev/null 2>&1; then
+              echo "⚠️ Found stale digest entry, removing..."
+              aws dynamodb delete-item \
+                --table-name ${DYNAMODB_TABLE} \
+                --key "{\"LockID\": {\"S\": \"$DIGEST_KEY\"}}" \
+                --region us-east-1 || echo "⚠️ Failed to remove digest entry"
+            fi
+          else
+            echo "📄 No existing state file found"
+          fi
+
+          terraform init \
+            -backend-config="region=us-east-1" \
+            -backend-config="bucket=$BACKEND_BUCKET" \
+            -backend-config="key=$STATE_KEY" \
+            -backend-config="dynamodb_table=$DYNAMODB_TABLE"
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: ./terraform
+
+      - name: Debug Terraform State (for destroy operations)
+        if: >-
+          needs.set_env_vars_dispatch.outputs.agent_action == 'destroy'
+        run: |
+          echo "🔍 Debugging Terraform State for agent: ${agent_identifier_name}"
+          echo "Current working directory: $(pwd)"
+          echo "APP_ENV: ${APP_ENV}"
+          terraform state list || echo "No resources found in state"
+        working-directory: ./terraform
+
+      - name: Terraform Plan
+        run: |
+          if [[ "${{ needs.set_env_vars_dispatch.outputs.agent_action }}" == "destroy" ]]; then
+            # Plan for destroy
+            if [[ "${APP_ENV}" == "prod" ]]; then
+              terraform plan -destroy -input=false -out=tfplan -var="agent_identifier=${{ needs.set_env_vars_dispatch.outputs.agent_identifier_name }}" -var-file="prod.tfvars"
+            else
+              terraform plan -destroy -input=false -out=tfplan -var="agent_identifier=${{ needs.set_env_vars_dispatch.outputs.agent_identifier_name }}" -var-file="dev.tfvars"
+            fi
+          else
+            # Plan for apply
+            if [[ "${APP_ENV}" == "prod" ]]; then
+              terraform plan -input=false -out=tfplan -var="agent_identifier=${{ needs.set_env_vars_dispatch.outputs.agent_identifier_name }}" -var-file="prod.tfvars"
+            else
+              terraform plan -input=false -out=tfplan -var="agent_identifier=${{ needs.set_env_vars_dispatch.outputs.agent_identifier_name }}" -var-file="dev.tfvars"
+            fi
+          fi
+        working-directory: ./terraform
+
+      - name: Terraform Apply or Destroy
+        run: |
+          if [[ "${{ needs.set_env_vars_dispatch.outputs.agent_action }}" == "destroy" ]]; then
+            echo "🧹 Starting EC2 infrastructure destruction..."
+            if [[ "${APP_ENV}" == "prod" ]]; then
+              terraform destroy -auto-approve -var="agent_identifier=${{ needs.set_env_vars_dispatch.outputs.agent_identifier_name }}" -var-file="prod.tfvars"
+            else
+              terraform destroy -auto-approve -var="agent_identifier=${{ needs.set_env_vars_dispatch.outputs.agent_identifier_name }}" -var-file="dev.tfvars"
+            fi
+            echo "✅ Destruction completed!"
+          else
+            echo "🚀 Starting EC2 infrastructure creation..."
+            if [[ "${APP_ENV}" == "prod" ]]; then
+              terraform apply -auto-approve -var="agent_identifier=${{ needs.set_env_vars_dispatch.outputs.agent_identifier_name }}" -var-file="prod.tfvars"
+            else
+              terraform apply -auto-approve -var="agent_identifier=${{ needs.set_env_vars_dispatch.outputs.agent_identifier_name }}" -var-file="dev.tfvars"
+            fi
+            echo "✅ Creation completed!"
+          fi
+        working-directory: ./terraform
+        env:
+          AWS_ACCESS_KEY_ID: ${{ env.APP_ENV == 'prod' && secrets.AWS_ACCESS_KEY_ID || secrets.DEV_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.APP_ENV == 'prod' && secrets.AWS_SECRET_ACCESS_KEY || secrets.DEV_AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          APP_ENV: ${{ env.APP_ENV }}
+
+      - name: Capture Terraform Outputs (only on create)
+        if: >-
+          needs.set_env_vars_dispatch.outputs.agent_action == 'create'
+        run: |
+          mkdir -p ../agt_outputs
+          terraform output -json > ../agt_outputs/${agent_identifier_name}.json
+        working-directory: ./terraform
+
+      - name: Clean JSON File
+        if: >-
+          needs.set_env_vars_dispatch.outputs.agent_action == 'create'
+        run: |
+          sed -i '/^\[command\]/d' agt_outputs/${agent_identifier_name}.json
+          sed -i '/^::debug::/d' agt_outputs/${agent_identifier_name}.json
+
+      - name: Debug Terraform Output File
+        if: >-
+          needs.set_env_vars_dispatch.outputs.agent_action == 'create'
+        run: |
+          echo "Contents of ./agt_outputs/${agent_identifier_name}.json:"
+          cat agt_outputs/${agent_identifier_name}.json
+
+      # - name: Commit tfvars and outputs (only on create)
+      #   if: >-
+      #     needs.set_env_vars_dispatch.outputs.agent_action == 'create'
+      #   run: |
+      #     git config --global user.email "eswar-lohith.bhukke@capgemini.com"
+      #     git config --global user.name "ebhukke"
+      #     git fetch origin
+      #     git checkout master
+      #     git pull origin master
+      #     git add tfvars_agt_input/${agent_identifier_name}.tfvars.json
+      #     git add agt_outputs/${agent_identifier_name}.json
+      #     git commit -m "Save tfvars & outputs for agent: ${agent_identifier_name}"
+      #     git push origin master
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.TOKEN_GITHUB }}
+
+      - name: Clean up .tfstate file from S3 and DynamoDB digest
+        if: >-
+          needs.set_env_vars_dispatch.outputs.agent_action == 'destroy'
+        run: |
+          if [[ "${APP_ENV}" == "prod" ]]; then
+            STATE_KEY="state/prod/bnk-pmts-dispute-resol/${agent_identifier_name}/terraform.tfstate"
+            DYNAMODB_TABLE="dispute-tf-lock-prd"
+            S3_BUCKET="ptr-tf-state-prd"
+          else
+            STATE_KEY="state/dev/${agent_identifier_name}/terraform.tfstate"
+            DYNAMODB_TABLE="terraform-lock-dev"
+            S3_BUCKET="dev-ptr-ag-bnk-pmts-dispute-resol-terraform-locks"
+          fi
+
+          echo "🧹 Cleaning up Terraform state and DynamoDB digest..."
+
+          # First, try to remove any active locks
+          echo "🔓 Checking for active locks in DynamoDB..."
+          LOCK_ID="${S3_BUCKET}/${STATE_KEY}"
+          aws dynamodb delete-item \
+            --table-name ${DYNAMODB_TABLE} \
+            --key "{\"LockID\": {\"S\": \"${LOCK_ID}\"}}" \
+            --region us-east-1 2>/dev/null || echo "⚠️ No active lock found"
+
+          # Remove S3 state file
+          echo "🗑️ Removing S3 state file..."
+          aws s3 rm s3://${S3_BUCKET}/${STATE_KEY} || echo "⚠️ S3 state file not found or already deleted"
+
+          # Clean up any digest entries by scanning the table for our state key
+          echo "🔍 Scanning for digest entries..."
+          aws dynamodb scan \
+            --table-name ${DYNAMODB_TABLE} \
+            --filter-expression "contains(LockID, :state_key)" \
+            --expression-attribute-values "{\":state_key\": {\"S\": \"${STATE_KEY}\"}}" \
+            --projection-expression "LockID" \
+            --region us-east-1 \
+            --output text \
+            --query 'Items[].LockID.S' | while read -r lock_id; do
+              if [[ -n "$lock_id" ]]; then
+                echo "🗑️ Removing digest entry: $lock_id"
+                aws dynamodb delete-item \
+                  --table-name ${DYNAMODB_TABLE} \
+                  --key "{\"LockID\": {\"S\": \"$lock_id\"}}" \
+                  --region us-east-1 || echo "⚠️ Failed to remove digest entry: $lock_id"
+              fi
+            done
+
+          # Ensure complete cleanup - do NOT create empty state
+          echo "🔄 Final verification of state cleanup..."
+
+          # Verify S3 state file is actually removed
+          if aws s3 ls s3://${S3_BUCKET}/${STATE_KEY} >/dev/null 2>&1; then
+            echo "⚠️ State file still exists, force removing..."
+            aws s3 rm s3://${S3_BUCKET}/${STATE_KEY} --region us-east-1
+          fi
+
+          # Final check for any remaining digest entries
+          REMAINING_DIGESTS=$(aws dynamodb scan \
+            --table-name ${DYNAMODB_TABLE} \
+            --filter-expression "contains(LockID, :digest_suffix)" \
+            --expression-attribute-values "{\":digest_suffix\": {\"S\": \"-digest\"}}" \
+            --projection-expression "LockID" \
+            --region us-east-1 \
+            --output text \
+            --query 'Count')
+
+          if [[ "$REMAINING_DIGESTS" -gt 0 ]]; then
+            echo "⚠️ Found $REMAINING_DIGESTS digest entries, cleaning them up..."
+            aws dynamodb scan \
+              --table-name ${DYNAMODB_TABLE} \
+              --filter-expression "contains(LockID, :digest_suffix)" \
+              --expression-attribute-values "{\":digest_suffix\": {\"S\": \"-digest\"}}" \
+              --projection-expression "LockID" \
+              --region us-east-1 \
+              --output text \
+              --query 'Items[].LockID.S' | while read -r digest_id; do
+                if [[ -n "$digest_id" ]]; then
+                  echo "🗑️ Removing digest: $digest_id"
+                  aws dynamodb delete-item \
+                    --table-name ${DYNAMODB_TABLE} \
+                    --key "{\"LockID\": {\"S\": \"$digest_id\"}}" \
+                    --region us-east-1 || echo "⚠️ Failed to remove: $digest_id"
+                fi
+              done
+          fi
+
+          echo "✅ Cleanup completed!"

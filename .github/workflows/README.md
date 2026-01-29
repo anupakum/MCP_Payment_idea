@@ -1,0 +1,347 @@
+# GitHub Workflows
+
+This directory contains GitHub Actions workflows for CI/CD.
+
+## Available Workflows
+
+### 1. Deploy to AWS EC2 (`deploy.yml`)
+
+**Automatically deploys the application to AWS EC2 with environment-specific credentials.**
+
+**Triggers:**
+- Push to **any branch** (main, master, feature branches, etc.)
+- Manual workflow dispatch
+
+**Branch-Based Deployment:**
+- **`main` or `master` branch** → Uses **Production** AWS credentials (`AWS_ACCESS_KEY_ID`)
+- **All other branches** → Uses **Development** AWS credentials (`DEV_AWS_ACCESS_KEY_ID`)
+
+**What it does:**
+1. Detects branch and selects appropriate AWS credentials
+2. Creates `.env` file from GitHub Secrets (with environment-specific AWS credentials)
+3. Creates `web/.env.local` file from GitHub Secrets
+4. Gets EC2 instance ID from IP address
+5. **Clones/updates repository on EC2 using GitHub PAT** (from the branch that triggered the workflow)
+6. Runs `startup.sh` script on EC2 which:
+   - Clones repository if first-time deployment
+   - Pulls latest changes if already exists
+   - Sets up virtual environment
+   - Installs dependencies (Python + Node.js)
+   - Builds Next.js production bundle
+   - Starts all services with PM2 (mcp-server, backend, frontend)
+7. Performs health checks on all services
+
+**Key Features:**
+- ✅ **No manual Git setup needed on EC2** - Repository is automatically cloned using PAT
+- ✅ **Branch-aware deployment** - Deploys the exact branch that triggered the workflow
+- ✅ **Idempotent** - Can be run multiple times safely (pulls latest changes)
+- ✅ **No S3 packaging needed** - Direct Git clone is faster and more reliable
+
+**Required Secrets:**
+See [../SECRETS.md](../SECRETS.md) for complete setup instructions.
+
+---
+
+## Setup Instructions
+
+### 1. Configure GitHub Secrets
+
+Go to: **Settings** → **Secrets and variables** → **Actions**
+
+**Add these 8 secrets:**
+
+**Production Credentials (for main/master branch):**
+- `AWS_ACCESS_KEY_ID` - Production AWS access key
+- `AWS_SECRET_ACCESS_KEY` - Production AWS secret key
+
+**Development Credentials (for all other branches):**
+- `DEV_AWS_ACCESS_KEY_ID` - Development AWS access key
+- `DEV_AWS_SECRET_ACCESS_KEY` - Development AWS secret key
+
+**GitHub Access:**
+- `GITHUB_PAT` - Personal Access Token with `repo` scope (for cloning private repo on EC2)
+
+**Shared Configuration:**
+- `AWS_REGION` - AWS region (e.g., `us-east-1`)
+- `EC2_HOST` - EC2 public IP (from `terraform output ec2_public_ip`)
+- `APP_DIR` - Application directory (e.g., `/home/ec2-user/ptr_ag_bnk_pmts_dispute_resol`)
+
+### 2. Deploy Infrastructure First
+
+Before using GitHub Actions, deploy EC2 with Terraform:
+```powershell
+cd terraform
+.\deploy.ps1 -Action apply
+```
+
+Get the EC2 public IP:
+```powershell
+terraform output ec2_public_ip
+```
+
+### 3. Create IAM Users for GitHub Actions
+
+**Option 1: Separate AWS Accounts (Recommended)**
+
+Create IAM users in separate production and development AWS accounts:
+
+**Production Account:**
+1. IAM → Users → Create User: `github-actions-deploy-prod`
+2. Attach policies: `AmazonEC2FullAccess`, `AmazonSSMFullAccess`, `AmazonS3FullAccess`, `AmazonDynamoDBFullAccess`
+3. Add custom Bedrock policy (see [../SECRETS.md](../SECRETS.md))
+4. Create access key → Save as `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+
+**Development Account:**
+1. IAM → Users → Create User: `github-actions-deploy-dev`
+2. Attach same policies
+3. Create access key → Save as `DEV_AWS_ACCESS_KEY_ID` and `DEV_AWS_SECRET_ACCESS_KEY`
+
+**Option 2: Same AWS Account**
+
+Use same account but different IAM users with restricted policies.
+
+### 4. Verify EC2 SSM Agent
+
+The workflow uses AWS Systems Manager (SSM) instead of SSH. Verify SSM agent is running:
+
+```bash
+# SSH to EC2 first
+ssh -i ~/.ssh/your-key.pem ec2-user@<EC2_IP>
+
+# Check SSM agent status
+sudo systemctl status amazon-ssm-agent
+
+# If not running, start it
+sudo systemctl start amazon-ssm-agent
+sudo systemctl enable amazon-ssm-agent
+```
+
+Verify from your machine:
+```powershell
+aws ssm describe-instance-information --region us-east-1
+```
+
+You should see your EC2 instance listed.
+
+### 5. Push Code to Trigger Deployment
+
+**Deploy to Production:**
+```bash
+git checkout main
+git add .
+git commit -m "Deploy to production"
+git push origin main
+# Uses: AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+```
+
+**Deploy to Development:**
+```bash
+git checkout crew-ai-v3-new
+git add .
+git commit -m "Deploy to development"
+git push origin crew-ai-v3-new
+# Uses: DEV_AWS_ACCESS_KEY_ID + DEV_AWS_SECRET_ACCESS_KEY
+```
+
+GitHub Actions will automatically deploy based on the branch!
+
+---
+
+## Monitoring Deployments
+
+### View Workflow Runs
+
+1. Go to **Actions** tab in GitHub
+2. Select **Deploy to AWS EC2** workflow
+3. Click on the latest run to see logs
+
+### Manual Trigger
+
+1. Go to **Actions** tab
+2. Select **Deploy to AWS EC2**
+3. Click **Run workflow**
+4. Choose branch and click **Run workflow**
+
+---
+
+## Environment Variables
+
+### Backend `.env` (Generated by Workflow)
+
+**Production (main/master branch):**
+```bash
+USE_MCP_HTTP=true
+MCP_URL=http://localhost:8001                    # Backend → MCP (same server)
+CORS_ORIGINS=http://<EC2_IP>:3000               # Allow frontend origin
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=<from AWS_ACCESS_KEY_ID secret>        # Production credentials
+AWS_SECRET_ACCESS_KEY=<from AWS_SECRET_ACCESS_KEY secret>
+AWS_BEDROCK_MODEL_ID=anthropic.claude-haiku-4-5-20251001-v1:0
+ENVIRONMENT=production
+```
+
+**Development (other branches):**
+```bash
+USE_MCP_HTTP=true
+MCP_URL=http://localhost:8001                    # Backend → MCP (same server)
+CORS_ORIGINS=http://<EC2_IP>:3000               # Allow frontend origin
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=<from DEV_AWS_ACCESS_KEY_ID secret>        # Development credentials
+AWS_SECRET_ACCESS_KEY=<from DEV_AWS_SECRET_ACCESS_KEY secret>
+AWS_BEDROCK_MODEL_ID=anthropic.claude-haiku-4-5-20251001-v1:0
+ENVIRONMENT=development
+```
+
+### Frontend `.env.local` (Generated by Workflow)
+
+**All branches:**
+```bash
+NEXT_PUBLIC_API_URL=http://<EC2_IP>:8000  # Browser → Backend API
+NEXT_PUBLIC_ENV=production                 # or 'development' based on branch
+```
+
+**Important Notes:**
+- ✅ `MCP_URL=http://localhost:8001` - Server-to-server (same EC2 instance)
+- ✅ `NEXT_PUBLIC_API_URL=http://<EC2_IP>:8000` - Browser needs EC2 public IP!
+- ✅ AWS credentials fetched from GitHub Secrets based on branch
+- ✅ Environment automatically set based on branch (production/development)
+
+---
+
+## Troubleshooting
+
+### Deployment Fails
+
+**Check which credentials are being used:**
+- `main`/`master` branch → Should use `AWS_ACCESS_KEY_ID` (production)
+- Other branches → Should use `DEV_AWS_ACCESS_KEY_ID` (development)
+
+**Common issues:**
+- Check GitHub Actions logs for errors
+- Verify all 7 secrets are set correctly in GitHub
+- Ensure correct AWS credentials for the branch
+- Test AWS credentials locally: `aws sts get-caller-identity`
+
+### SSM Command Fails
+
+- Verify SSM agent is running: `sudo systemctl status amazon-ssm-agent`
+- Check EC2 IAM role has `AmazonSSMManagedInstanceCore` policy
+- Test SSM connectivity: `aws ssm describe-instance-information --region us-east-1`
+- Check CloudWatch Logs for SSM errors
+
+### Services Not Starting
+
+- Check deployment logs in GitHub Actions
+- View PM2 status: `pm2 status` (if you have SSH access)
+- View logs: `pm2 logs backend` or `pm2 logs mcp-server` or `pm2 logs frontend`
+- Check if ports are already in use: `sudo netstat -tlnp | grep -E '8000|8001|3000'`
+
+### Health Check Fails
+
+- Verify security group allows inbound traffic on ports 8000, 8001, 3000
+- Test manually from your machine:
+  - `curl http://<EC2_IP>:8000/health`
+  - `curl http://<EC2_IP>:8001/health`
+  - `curl http://<EC2_IP>:3000`
+- Check if services are running: Use SSM or SSH to check `pm2 status`
+
+### Frontend Can't Connect to Backend
+
+- Verify `NEXT_PUBLIC_API_URL` uses EC2 public IP (not localhost!)
+- Check CORS settings allow frontend origin
+- Verify security group allows port 8000 from anywhere (or your IP)
+- Test backend API directly: `curl http://<EC2_IP>:8000/health`
+
+---
+
+## Security Notes
+
+### Deployment Method: AWS Systems Manager (SSM)
+
+- ✅ **No SSH keys needed** - Uses AWS IAM authentication
+- ✅ **Audit trail** - All commands logged in CloudTrail
+- ✅ **Secure** - No open SSH port required (port 22 can be restricted)
+- ✅ **Centralized** - Commands logged in CloudWatch
+
+### Credential Management
+
+- ✅ **Branch-based credentials** - Production and development isolated
+- ✅ **GitHub Secrets** - All credentials encrypted by GitHub
+- ✅ **No hardcoded secrets** - Never in code or .env files in git
+- ✅ **Automatic cleanup** - Temporary files deleted after deployment
+- ✅ **Least privilege** - IAM users have only necessary permissions
+
+### Best Practices
+
+1. **Use separate AWS accounts** for production and development
+2. **Rotate AWS access keys** regularly (quarterly recommended)
+3. **Enable MFA** on IAM user accounts
+4. **Review IAM policies** to ensure least privilege
+5. **Monitor CloudTrail** for deployment activities
+6. **Never commit** `.env` files to git (use `.gitignore`)
+
+---
+
+## Workflow Architecture
+
+### Deployment Flow
+
+```
+Push Code → GitHub Actions
+    ↓
+Detect Branch (main vs others)
+    ↓
+Select AWS Credentials
+    ├── main/master → Production (AWS_ACCESS_KEY_ID)
+    └── other → Development (DEV_AWS_ACCESS_KEY_ID)
+    ↓
+Generate .env files
+    ↓
+Package Application
+    ↓
+Upload to S3
+    ↓
+Deploy via SSM → EC2
+    ↓
+Install Dependencies
+    ↓
+Build Next.js
+    ↓
+Restart PM2 Services
+    ↓
+Health Checks
+    ↓
+Cleanup S3
+    ↓
+✅ Deployment Complete
+```
+
+### Key Components
+
+1. **AWS Systems Manager (SSM)** - Secure deployment without SSH
+2. **PM2 Process Manager** - Manages backend and frontend services
+3. **S3 Temporary Bucket** - Deployment package transfer
+4. **GitHub Secrets** - Encrypted credential storage
+5. **Branch Detection** - Automatic environment selection
+
+---
+
+## Next Steps
+
+After successful deployment:
+
+1. Access frontend: `http://<EC2_IP>:3000`
+2. Test backend API: `http://<EC2_IP>:8000/health`
+3. Test MCP server: `http://<EC2_IP>:8001/health`
+4. Monitor services: Check GitHub Actions logs or use SSM to run `pm2 monit`
+
+## Related Documentation
+
+- [../SECRETS.md](../SECRETS.md) - Complete GitHub Secrets setup guide
+- [../BRANCH_BASED_DEPLOYMENT.md](../BRANCH_BASED_DEPLOYMENT.md) - Branch-based deployment strategy
+- [../BRANCH_DEPLOYMENT_SUMMARY.md](../BRANCH_DEPLOYMENT_SUMMARY.md) - Quick reference
+- [../../terraform/README.md](../../terraform/README.md) - Infrastructure deployment guide
+
+---
+
+**Questions?** See the documentation above or check GitHub Actions logs for detailed deployment information.
